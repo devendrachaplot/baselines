@@ -1,6 +1,5 @@
 import numpy as np
-from gym import spaces
-from collections import OrderedDict
+import gym
 from . import VecEnv
 
 class DummyVecEnv(VecEnv):
@@ -8,22 +7,9 @@ class DummyVecEnv(VecEnv):
         self.envs = [fn() for fn in env_fns]
         env = self.envs[0]
         VecEnv.__init__(self, len(env_fns), env.observation_space, env.action_space)
-        shapes, dtypes = {}, {}
-        self.keys = []
-        obs_space = env.observation_space
-        if isinstance(obs_space, spaces.Dict):
-            assert isinstance(obs_space.spaces, OrderedDict)
-            for key, box in obs_space.spaces.items():
-                assert isinstance(box, spaces.Box)
-                shapes[key] = box.shape
-                dtypes[key] = box.dtype
-                self.keys.append(key)
-        else:
-            box = obs_space
-            assert isinstance(box, spaces.Box)
-            self.keys = [None]
-            shapes, dtypes = { None: box.shape }, { None: box.dtype }
-        self.buf_obs = { k: np.zeros((self.num_envs,) + tuple(shapes[k]), dtype=dtypes[k]) for k in self.keys }
+
+        obs_spaces = self.observation_space.spaces if isinstance(self.observation_space, gym.spaces.Tuple) else (self.observation_space,)
+        self.buf_obs = [np.zeros((self.num_envs,) + tuple(s.shape), s.dtype) for s in obs_spaces]
         self.buf_dones = np.zeros((self.num_envs,), dtype=np.bool)
         self.buf_rews  = np.zeros((self.num_envs,), dtype=np.float32)
         self.buf_infos = [{} for _ in range(self.num_envs)]
@@ -33,32 +19,34 @@ class DummyVecEnv(VecEnv):
         self.actions = actions
 
     def step_wait(self):
-        for e in range(self.num_envs):
-            obs, self.buf_rews[e], self.buf_dones[e], self.buf_infos[e] = self.envs[e].step(self.actions[e])
-            if self.buf_dones[e]:
-                obs = self.envs[e].reset()
-            self._save_obs(e, obs)
+        for i in range(self.num_envs):
+            obs_tuple, self.buf_rews[i], self.buf_dones[i], self.buf_infos[i] = self.envs[i].step(self.actions[i])
+            if self.buf_dones[i]:
+                obs_tuple, self.buf_infos[i] = self.envs[i].reset()
+            if isinstance(obs_tuple, (tuple, list)):
+                for t,x in enumerate(obs_tuple):
+                    self.buf_obs[t][i] = x
+            else:
+                self.buf_obs[0][i] = obs_tuple
         return (self._obs_from_buf(), np.copy(self.buf_rews), np.copy(self.buf_dones),
                 self.buf_infos.copy())
 
     def reset(self):
-        for e in range(self.num_envs):
-            obs = self.envs[e].reset()
-            self._save_obs(e, obs)
-        return self._obs_from_buf()
+        for i in range(self.num_envs):
+            obs_tuple, self.buf_infos[i] = self.envs[i].reset()
+            if isinstance(obs_tuple, (tuple, list)):
+                for t,x in enumerate(obs_tuple):
+                    self.buf_obs[t][i] = x
+            else:
+                self.buf_obs[0][i] = obs_tuple
+        return (self._obs_from_buf(), self.buf_infos.copy())
 
     def close(self):
         return
 
-    def _save_obs(self, e, obs):
-        for k in self.keys:
-            if k is None:
-                self.buf_obs[k][e] = obs
-            else:
-                self.buf_obs[k][e] = obs[k]
-
     def _obs_from_buf(self):
-        if self.keys==[None]:
-            return self.buf_obs[None]
+        if len(self.buf_obs) == 1:
+            return np.copy(self.buf_obs[0])
         else:
-            return self.buf_obs
+            return tuple(np.copy(x) for x in self.buf_obs)
+
